@@ -16,7 +16,7 @@ const EstimationPanel: React.FC<EstimationPanelProps> = ({ items, catalog }) => 
             if (!costItem) return null;
             const totalCost = item.totalQuantity * lc.ratio * costItem.unitPrice;
             return { ...costItem, ratio: lc.ratio, totalCost };
-        }).filter(Boolean);
+        }).filter((c): c is (CostItem & { ratio: number, totalCost: number }) => c !== null);
     };
 
     const projectTotal = items.reduce((sum, item) => {
@@ -31,7 +31,7 @@ const EstimationPanel: React.FC<EstimationPanelProps> = ({ items, catalog }) => 
 
         items.forEach(item => {
             const costs = getLinkedCostItems(item);
-            costs.forEach((c: any) => {
+            costs.forEach((c) => {
                 rows.push([
                     c.category,
                     item.name,
@@ -88,7 +88,7 @@ const EstimationPanel: React.FC<EstimationPanelProps> = ({ items, catalog }) => 
                             </div>
 
                             <div className="space-y-2 pl-4 border-l-2 border-gray-100 group-hover:border-blue-200 transition-colors border-dashed">
-                                {costs.map((c: any) => (
+                                {costs.map((c) => (
                                     <div key={c.id} className="flex flex-col text-xs space-y-0.5">
                                         <div className="flex items-center justify-between text-gray-600 font-medium">
                                             <span>{c.name}</span>

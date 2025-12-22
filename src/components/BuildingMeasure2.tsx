@@ -3,10 +3,9 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import * as fabric from "fabric";
 import type * as PDFJS from "pdfjs-dist";
-import { Point, Measurement, TakeoffItem, TakeoffMode, CostItem } from "./types";
+import { Point, Measurement, TakeoffItem, TakeoffMode } from "./types";
 import { ZoomIn, ZoomOut, Move, Ruler, FileUp, ChevronLeft, ChevronRight, Scissors, Undo2, RotateCcw, MousePointer2 } from "lucide-react";
 import TakeoffSidebar from "./TakeoffSidebar";
-import EstimationPanel from "./EstimationPanel";
 
 const FloorPlanMeasure: React.FC = () => {
   const [pdfjs, setPdfjs] = useState<typeof PDFJS | null>(null);
@@ -15,9 +14,7 @@ const FloorPlanMeasure: React.FC = () => {
   useEffect(() => {
     const loadPdfjs = async () => {
       try {
-        // Use explicit .mjs path to avoid Webpack 5 evaluation issues
         const lib = await import("pdfjs-dist/build/pdf.mjs");
-        // Note: For version 4.x we use mjs on cdn too
         lib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${lib.version}/pdf.worker.min.mjs`;
         setPdfjs(lib);
       } catch (err) {
@@ -26,22 +23,15 @@ const FloorPlanMeasure: React.FC = () => {
     };
     loadPdfjs();
   }, []);
+
   const [scale, setScale] = useState<number | null>(null);
   const [calibrationMode, setCalibrationMode] = useState<boolean>(false);
   const [calibrationPoint1, setCalibrationPoint1] = useState<Point | null>(null);
   const [calibrationDistance, setCalibrationDistance] = useState<string>("");
+  const [calibrationLine, setCalibrationLine] = useState<{ p1: Point, p2: Point, distance: number } | null>(null);
 
   const [takeoffItems, setTakeoffItems] = useState<TakeoffItem[]>([]);
   const [activeItemId, setActiveItemId] = useState<string | null>(null);
-
-  const [costCatalog] = useState<CostItem[]>([
-    { id: 'c1', name: 'Concrete Mix', unit: 'sqm', unitPrice: 45.00, category: 'Materials' },
-    { id: 'c2', name: 'Labor - Concrete', unit: 'sqm', unitPrice: 20.00, category: 'Labor' },
-    { id: 'c3', name: 'Timber Studs', unit: 'm', unitPrice: 12.50, category: 'Materials' },
-    { id: 'c4', name: 'Labor - Wall Framing', unit: 'm', unitPrice: 18.00, category: 'Labor' },
-    { id: 'c5', name: 'Interior Paint', unit: 'sqm', unitPrice: 7.50, category: 'Materials' },
-    { id: 'c6', name: 'Countable Fixings', unit: 'ea', unitPrice: 5.00, category: 'Hardware' },
-  ]);
 
   const [numPages, setNumPages] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -50,6 +40,8 @@ const FloorPlanMeasure: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricRef = useRef<fabric.Canvas | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const bgImageRef = useRef<fabric.Image | null>(null);
+  const ghostLineRef = useRef<fabric.Group | null>(null);
 
   const [currentPoints, setCurrentPoints] = useState<Point[]>([]);
   const [tempLines, setTempLines] = useState<fabric.Object[]>([]);
@@ -58,291 +50,115 @@ const FloorPlanMeasure: React.FC = () => {
   const [isDeductionMode, setIsDeductionMode] = useState(false);
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [unitSystem, setUnitSystem] = useState<'metric' | 'imperial'>('metric');
-  const bgImageRef = useRef<fabric.Image | null>(null);
   const [snappedVertex, setSnappedVertex] = useState<Point | null>(null);
-  const [calibrationLine, setCalibrationLine] = useState<{ p1: Point, p2: Point, distance: number } | null>(null);
+
   const isDragging = useRef(false);
   const lastMousePos = useRef({ x: 0, y: 0 });
 
-  // Unit Helpers
-  const parseDistance = (input: string): number => {
-    if (unitSystem === 'metric') return parseFloat(input) || 0;
+  // Persistence Key
+  const STORAGE_KEY = 'bwise_takeoff_data';
 
-    // Imperial Parser (10'6", 10-6, 10 6)
+  // Unit Helpers
+  const parseDistance = useCallback((input: string): number => {
+    if (unitSystem === 'metric') return parseFloat(input) || 0;
     const clean = input.replace(/["\s]/g, '').replace(/'/g, '-');
     const parts = clean.split('-');
     if (parts.length === 2) {
       return parseFloat(parts[0]) + (parseFloat(parts[1]) / 12);
     }
     return parseFloat(parts[0]) || 0;
-  };
+  }, [unitSystem]);
 
-  const formatDistance = (val: number): string => {
+  const formatDistance = useCallback((val: number): string => {
     if (unitSystem === 'metric') return `${val.toFixed(2)}m`;
-
-    // Imperial Formatter
     const feet = Math.floor(val);
     const inches = Math.round((val - feet) * 12);
     return `${feet}'-${inches}"`;
-  };
-
-  const formatArea = (val: number): string => {
-    if (unitSystem === 'metric') return `${val.toFixed(2)} sqm`;
-    return `${val.toFixed(2)} sqft`;
-  };
-
-  // Persistence Key
-  const STORAGE_KEY = 'bwise_takeoff_data';
-
-  // 4. Update units when System changes
-  useEffect(() => {
-    setTakeoffItems(prev => prev.map(item => {
-      let newUnit = item.unit;
-      if (unitSystem === 'metric') {
-        if (item.type === 'linear') newUnit = 'm';
-        if (item.type === 'area') newUnit = 'sqm';
-      } else {
-        if (item.type === 'linear') newUnit = 'ft';
-        if (item.type === 'area') newUnit = 'sqft';
-      }
-      return { ...item, unit: newUnit };
-    }));
   }, [unitSystem]);
 
-  // 5. Save to LocalStorage
-  // 1. Initial Load (Hydration)
-  useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        const { takeoffItems: savedItems, scale: savedScale } = JSON.parse(saved);
-        if (savedItems) setTakeoffItems(savedItems);
-        if (savedScale) setScale(savedScale);
-      } catch (e) {
-        console.error("Failed to load saved takeoff data", e);
-      }
+  const formatArea = useCallback((val: number): string => {
+    if (unitSystem === 'metric') return `${val.toFixed(2)} sqm`;
+    return `${val.toFixed(2)} sqft`;
+  }, [unitSystem]);
+
+  // Utility Functions
+  const calculateArea = useCallback((points: Point[]): number => {
+    if (points.length < 3) return 0;
+    let area = 0;
+    for (let i = 0; i < points.length; i++) {
+      const p1 = points[i];
+      const p2 = points[(i + 1) % points.length];
+      area += (p1.x * p2.y - p2.x * p1.y);
     }
-  }, []);
+    const pixelArea = Math.abs(area / 2);
+    return scale ? pixelArea / (scale * scale) : pixelArea;
+  }, [scale]);
 
-  // 2. Auto-Save on change
-  useEffect(() => {
-    if (takeoffItems.length > 0 || scale) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ takeoffItems, scale }));
-    }
-  }, [takeoffItems, scale]);
+  const getSnappedVertex = useCallback((currentPointer: Point): Point => {
+    const snapThreshold = 15;
+    let nearest: Point | null = null;
+    let minDist = Infinity;
 
-  // 1. Initialize Fabric Canvas ONCE
-  useEffect(() => {
-    if (!canvasRef.current || fabricRef.current) return;
-
-    const fabricCanvas = new fabric.Canvas(canvasRef.current, {
-      width: containerRef.current?.offsetWidth || 800,
-      height: 600,
-      selection: false,
-    });
-
-    fabricRef.current = fabricCanvas;
-
-    return () => {
-      fabricCanvas.dispose();
-      fabricRef.current = null;
-    };
-  }, []);
-
-  // 2. Manage Event Listeners (refresh when state changes)
-  useEffect(() => {
-    const fabricCanvas = fabricRef.current;
-    if (!fabricCanvas) return;
-
-    const onMouseDown = (opt: any) => {
-      if (isPanningMode) {
-        isDragging.current = true;
-        fabricCanvas.selection = false;
-        lastMousePos.current = { x: opt.e.clientX, y: opt.e.clientY };
-        fabricCanvas.defaultCursor = 'grabbing';
-        fabricCanvas.setCursor('grabbing');
-        fabricCanvas.renderAll();
-        return;
-      }
-
-      // Right click to finish (opt.button === 3) or just use its own handler
-      if (opt.button === 3) {
-        finishMeasurement();
-        return;
-      }
-      const pointer = fabricCanvas.getScenePoint(opt.e);
-      handleCanvasClick(pointer);
-    };
-
-    const onMouseMove = (opt: any) => {
-      if (isPanningMode && isDragging.current) {
-        const e = opt.e;
-        const vpt = [...fabricCanvas.viewportTransform];
-        vpt[4] += e.clientX - lastMousePos.current.x;
-        vpt[5] += e.clientY - lastMousePos.current.y;
-        fabricCanvas.setViewportTransform(vpt as any);
-        lastMousePos.current = { x: e.clientX, y: e.clientY };
-        return;
-      }
-
-      const pointer = fabricCanvas.getScenePoint(opt.e);
-      handleCanvasMouseMove(pointer, opt.e);
-    };
-
-    const onMouseUp = () => {
-      if (isPanningMode) {
-        isDragging.current = false;
-        fabricCanvas.defaultCursor = 'grab';
-        fabricCanvas.setCursor('grab');
-        fabricCanvas.renderAll();
-      }
-    };
-
-    const onDoubleClick = () => {
-      if (isPanningMode) return;
-      finishMeasurement();
-    };
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        finishMeasurement();
-      }
-      if (e.key === "Shift") {
-        setIsShiftPressed(true);
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === "z") {
-        e.preventDefault();
-        undo();
-      }
-      if (e.key.toLowerCase() === "v") {
-        setIsPanningMode(prev => !prev);
-      }
-      if (e.key.toLowerCase() === "x") {
-        setIsDeductionMode(prev => !prev);
-      }
-      if (e.key.toLowerCase() === "v") {
-        setIsSelectMode(prev => !prev);
-        setIsPanningMode(false);
-      }
-    };
-
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key === "Shift") {
-        setIsShiftPressed(false);
-      }
-    };
-
-    const onObjectModified = (opt: any) => {
-      const obj = opt.target;
-      if (!obj || !obj.data) return;
-      const { takeoffItemId, measurementId, pointIndex } = obj.data;
-
-      setTakeoffItems(prev => prev.map(item => {
-        if (item.id === takeoffItemId) {
-          return {
-            ...item,
-            measurements: item.measurements.map(m => {
-              if (m.id === measurementId) {
-                const newPoints = [...m.points];
-                // If it's a point-based object (Count), update that point
-                if (typeof pointIndex === 'number') {
-                  newPoints[pointIndex] = { x: obj.left, y: obj.top };
-                } else {
-                  // If it's a group or polygon, we'd need more complex logic
-                  // For now, let's keep it simple: moving is mostly for count items
-                }
-                return { ...m, points: newPoints };
-              }
-              return m;
-            })
-          };
-        }
-        return item;
-      }));
-    };
-
-    // Set initial cursor
-    let cursor = isPanningMode ? 'grab' : (isSelectMode ? 'default' : 'crosshair');
-    fabricCanvas.defaultCursor = cursor;
-    fabricCanvas.setCursor(cursor);
-
-    fabricCanvas.on("mouse:down", onMouseDown);
-    fabricCanvas.on("mouse:move", onMouseMove);
-    fabricCanvas.on("mouse:up", onMouseUp);
-    fabricCanvas.on("mouse:dblclick", onDoubleClick);
-    fabricCanvas.on("object:modified", onObjectModified);
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-
-    return () => {
-      fabricCanvas.off("mouse:down", onMouseDown);
-      fabricCanvas.off("mouse:move", onMouseMove);
-      fabricCanvas.off("mouse:up", onMouseUp);
-      fabricCanvas.off("mouse:dblclick", onDoubleClick);
-      fabricCanvas.off("object:modified", onObjectModified);
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
-    };
-  }, [calibrationMode, activeItemId, takeoffItems, currentPoints, scale, calibrationPoint1, isShiftPressed, isPanningMode, isSelectMode]);
-
-  // Sync Fabric Objects to state (The "Holy Grail" of React-Fabric synchronization)
-  useEffect(() => {
-    if (!fabricRef.current) return;
-    const canvas = fabricRef.current;
-
-    // Clear all
-    canvas.clear();
-
-    // Restore Background from Ref if it exists
-    if (bgImageRef.current) {
-      canvas.backgroundImage = bgImageRef.current;
-    }
-
+    // Check existing points
     takeoffItems.forEach(item => {
       item.measurements.forEach(m => {
-        if (item.type === 'linear' || item.type === 'polyline') {
-          for (let i = 0; i < m.points.length - 1; i++) {
-            drawDimensionProcedural(m.points[i], m.points[i + 1], item.color, item.name);
+        m.points.forEach(p => {
+          const dist = Math.sqrt(Math.pow(currentPointer.x - p.x, 2) + Math.pow(currentPointer.y - p.y, 2));
+          if (dist < snapThreshold && dist < minDist) {
+            minDist = dist;
+            nearest = p;
           }
-        } else if (item.type === 'area') {
-          drawAreaProcedural(m.points, item.color, m.quantity, item.unit);
-        } else if (item.type === 'count') {
-          m.points.forEach((p, idx) => drawCountProcedural(p, item.color, item.id, m.id, idx));
-        }
+        });
       });
     });
 
-    if (calibrationLine) {
-      drawDimensionProcedural(calibrationLine.p1, calibrationLine.p2, '#ff0000', `Scale Ref: ${formatDistance(calibrationLine.distance)}`);
-    }
+    // Check current points
+    currentPoints.forEach(p => {
+      const dist = Math.sqrt(Math.pow(currentPointer.x - p.x, 2) + Math.pow(currentPointer.y - p.y, 2));
+      if (dist < snapThreshold && dist < minDist) {
+        minDist = dist;
+        nearest = p;
+      }
+    });
 
-    canvas.requestRenderAll();
-  }, [takeoffItems, isSelectMode, scale, unitSystem, activeItemId, calibrationLine]);
+    setSnappedVertex(nearest);
+    return nearest || currentPointer;
+  }, [takeoffItems, currentPoints]);
 
-  const drawDimensionProcedural = (p1: Point, p2: Point, color: string, name?: string) => {
+  const getSnappedPoint = useCallback((currentPoint: Point, lastPoint: Point): Point => {
+    if (!isShiftPressed) return currentPoint;
+    const dx = currentPoint.x - lastPoint.x;
+    const dy = currentPoint.y - lastPoint.y;
+    const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+    const snappedAngle = Math.round(angle / 45) * 45;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    return {
+      x: lastPoint.x + dist * Math.cos(snappedAngle * Math.PI / 180),
+      y: lastPoint.y + dist * Math.sin(snappedAngle * Math.PI / 180)
+    };
+  }, [isShiftPressed]);
+
+  // Procedural Drawing Helpers
+  const drawDimensionProcedural = useCallback((p1: Point, p2: Point, color: string, name?: string) => {
+    if (!fabricRef.current) return;
     const dx = p2.x - p1.x;
     const dy = p2.y - p1.y;
     const angle = Math.atan2(dy, dx);
     const tickLen = 6;
 
-    const main = new fabric.Line([p1.x, p1.y, p2.x, p2.y], {
-      stroke: color, strokeWidth: 2, selectable: false, evented: false
-    });
-
+    const main = new fabric.Line([p1.x, p1.y, p2.x, p2.y], { stroke: color, strokeWidth: 2, selectable: false, evented: false });
     const t1 = new fabric.Line([
       p1.x - Math.sin(angle) * tickLen, p1.y + Math.cos(angle) * tickLen,
       p1.x + Math.sin(angle) * tickLen, p1.y - Math.cos(angle) * tickLen
     ], { stroke: color, strokeWidth: 2, selectable: false, evented: false });
-
     const t2 = new fabric.Line([
       p2.x - Math.sin(angle) * tickLen, p2.y + Math.cos(angle) * tickLen,
       p2.x + Math.sin(angle) * tickLen, p2.y - Math.cos(angle) * tickLen
     ], { stroke: color, strokeWidth: 2, selectable: false, evented: false });
 
     const dist = Math.sqrt(dx * dx + dy * dy);
-    const quantity = scale ? dist / scale : dist;
-    const label = `${name ? name + ': ' : ''}${formatDistance(quantity)}`;
-
+    const qty = scale ? dist / scale : dist;
+    const label = `${name ? name + ': ' : ''}${formatDistance(qty)}`;
     const text = new fabric.IText(label, {
       left: (p1.x + p2.x) / 2,
       top: (p1.y + p2.y) / 2 - 15,
@@ -355,11 +171,11 @@ const FloorPlanMeasure: React.FC = () => {
       evented: false,
       angle: angle * (180 / Math.PI)
     });
+    fabricRef.current.add(main, t1, t2, text);
+  }, [scale, formatDistance]);
 
-    fabricRef.current?.add(main, t1, t2, text);
-  };
-
-  const drawAreaProcedural = (points: Point[], color: string, quantity: number, unit: string) => {
+  const drawAreaProcedural = useCallback((points: Point[], color: string, quantity: number) => {
+    if (!fabricRef.current) return;
     const isDeduct = quantity < 0;
     const poly = new fabric.Polygon(points.map(p => ({ x: p.x, y: p.y })), {
       fill: isDeduct ? 'rgba(255, 255, 255, 0.5)' : color + '44',
@@ -382,10 +198,11 @@ const FloorPlanMeasure: React.FC = () => {
       selectable: false,
       evented: false
     });
-    fabricRef.current?.add(poly, text);
-  };
+    fabricRef.current.add(poly, text);
+  }, [formatArea]);
 
-  const drawCountProcedural = (p: Point, color: string, takeoffItemId?: string, measurementId?: string, pointIndex?: number) => {
+  const drawCountProcedural = useCallback((p: Point, color: string, takeoffItemId?: string, measurementId?: string, pointIndex?: number) => {
+    if (!fabricRef.current) return;
     const circle = new fabric.Circle({
       left: p.x,
       top: p.y,
@@ -400,217 +217,39 @@ const FloorPlanMeasure: React.FC = () => {
       hasControls: false,
       data: { takeoffItemId, measurementId, pointIndex }
     });
-    fabricRef.current?.add(circle);
-  };
+    fabricRef.current.add(circle);
+  }, [isSelectMode]);
 
-  // Update canvas size on window resize
-  useEffect(() => {
-    const handleResize = () => {
-      if (fabricRef.current && containerRef.current) {
-        fabricRef.current.setDimensions({
-          width: containerRef.current.offsetWidth,
-          height: fabricRef.current.height || 600
-        });
-      }
-    };
-
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
-
-  const renderPage = useCallback(async (pageNumber: number, pdf: PDFJS.PDFDocumentProxy) => {
-    const page = await pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: 2 }); // High res render
-    const canvas = document.createElement("canvas");
-    const context = canvas.getContext("2d");
-    if (!context) return;
-
-    canvas.height = viewport.height;
-    canvas.width = viewport.width;
-
-    await page.render({ canvasContext: context, viewport } as any).promise;
-
-    const dataUrl = canvas.toDataURL();
-    const fabricCanvas = fabricRef.current;
-    if (fabricCanvas) {
-      fabric.Image.fromURL(dataUrl).then((img) => {
-        // Resize canvas to match image ratio
-        const containerWidth = containerRef.current?.offsetWidth || 800;
-        const scaleFactor = containerWidth / img.width!;
-        img.set({
-          scaleX: scaleFactor,
-          scaleY: scaleFactor,
-          selectable: false,
-          evented: false,
-        });
-
-        fabricCanvas.setDimensions({
-          width: containerWidth,
-          height: img.height! * scaleFactor
-        });
-
-        fabricCanvas.clear();
-        bgImageRef.current = img;
-        fabricCanvas.backgroundImage = img;
-        fabricCanvas.requestRenderAll();
-        // The takeoffItems useEffect will handle drawing the measurements
-      });
+  const removeGhostLine = useCallback(() => {
+    if (ghostLineRef.current && fabricRef.current) {
+      fabricRef.current.remove(ghostLineRef.current);
+      ghostLineRef.current = null;
+      fabricRef.current.requestRenderAll();
     }
   }, []);
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (file.type === "application/pdf" && pdfjs) {
-      const arrayBuffer = await file.arrayBuffer();
-      const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
-      setPdfDoc(pdf);
-      setNumPages(pdf.numPages);
-      setCurrentPage(1);
-      renderPage(1, pdf);
-    } else {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const dataUrl = event.target?.result as string;
-        fabric.Image.fromURL(dataUrl).then((img) => {
-          const containerWidth = containerRef.current?.offsetWidth || 800;
-          const scaleFactor = containerWidth / img.width!;
-          img.set({
-            scaleX: scaleFactor,
-            scaleY: scaleFactor,
-            selectable: false,
-            evented: false,
-          });
-
-          if (fabricRef.current) {
-            fabricRef.current.setDimensions({
-              width: containerWidth,
-              height: img.height! * scaleFactor
-            });
-            fabricRef.current.clear();
-            bgImageRef.current = img;
-            fabricRef.current.backgroundImage = img;
-            fabricRef.current.requestRenderAll();
-          }
-        });
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const ghostLineRef = useRef<fabric.Object | null>(null);
-
-  const getSnappedVertex = (point: Point): Point => {
-    const threshold = 15; // pixels
-    let nearest: Point | null = null;
-    let minSourceDist = Infinity;
-
-    // Check all existing items and their measurements
-    takeoffItems.forEach(item => {
-      item.measurements.forEach(m => {
-        m.points.forEach(p => {
-          const dx = point.x - p.x;
-          const dy = point.y - p.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist < threshold && dist < minSourceDist) {
-            minSourceDist = dist;
-            nearest = p;
-          }
-        });
-      });
-    });
-
-    // Also check current active points
-    currentPoints.forEach(p => {
-      const dx = point.x - p.x;
-      const dy = point.y - p.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < threshold && dist < minSourceDist) {
-        minSourceDist = dist;
-        nearest = p;
-      }
-    });
-
-    if (nearest) {
-      setSnappedVertex(nearest);
-    } else {
-      setSnappedVertex(null);
-    }
-
-    return nearest || point;
-  };
-
-  const getSnappedPoint = (current: Point, last: Point): Point => {
-    if (!isShiftPressed) return current;
-    const dx = Math.abs(current.x - last.x);
-    const dy = Math.abs(current.y - last.y);
-    if (dx > dy) {
-      return { x: current.x, y: last.y }; // Horizontal snap
-    } else {
-      return { x: last.x, y: current.y }; // Vertical snap
-    }
-  };
-
-  const handleCanvasMouseMove = (origPoint: Point, e?: any) => {
+  const updateGhostLine = useCallback((start: Point, end: Point, color: string) => {
     if (!fabricRef.current) return;
-
-    // 1. First prioritize Vertex Snapping
-    let point = getSnappedVertex(origPoint);
-
-    // 2. Then apply Orthogonal snapping if Shift is pressed
-    let finalPoint = point;
-    if (calibrationMode && calibrationPoint1) {
-      finalPoint = getSnappedPoint(point, calibrationPoint1);
-    } else if (activeItemId && currentPoints.length > 0) {
-      finalPoint = getSnappedPoint(point, currentPoints[currentPoints.length - 1]);
-    }
-
-    // Handle Ghost Line for calibration or linear takeoff
-    if (calibrationMode && calibrationPoint1) {
-      updateGhostLine(calibrationPoint1, finalPoint, "#ff0000");
-    } else if (activeItemId && currentPoints.length > 0) {
-      const activeItem = takeoffItems.find(i => i.id === activeItemId);
-      if (activeItem && (activeItem.type === "linear" || activeItem.type === "area")) {
-        updateGhostLine(currentPoints[currentPoints.length - 1], finalPoint, activeItem.color);
-      }
-    } else {
-      removeGhostLine();
-    }
-  };
-
-  const updateGhostLine = (start: Point, end: Point, color: string) => {
-    if (!fabricRef.current) return;
+    removeGhostLine();
 
     const dx = end.x - start.x;
     const dy = end.y - start.y;
     const angle = Math.atan2(dy, dx);
     const tickLen = 6;
 
-    if (ghostLineRef.current) {
-      fabricRef.current.remove(ghostLineRef.current);
-    }
-
-    const main = new fabric.Line([start.x, start.y, end.x, end.y], {
-      stroke: color,
-      strokeWidth: 2,
-      strokeDashArray: [5, 5],
-      opacity: 0.5
-    });
-
+    const main = new fabric.Line([start.x, start.y, end.x, end.y], { stroke: color, strokeWidth: 2, strokeDashArray: [5, 5], opacity: 0.5 });
     const t1 = new fabric.Line([
       start.x - Math.sin(angle) * tickLen, start.y + Math.cos(angle) * tickLen,
       start.x + Math.sin(angle) * tickLen, start.y - Math.cos(angle) * tickLen
     ], { stroke: color, strokeWidth: 2, opacity: 0.5 });
-
     const t2 = new fabric.Line([
       end.x - Math.sin(angle) * tickLen, end.y + Math.cos(angle) * tickLen,
       end.x + Math.sin(angle) * tickLen, end.y - Math.cos(angle) * tickLen
     ], { stroke: color, strokeWidth: 2, opacity: 0.5 });
 
     const dist = Math.sqrt(dx * dx + dy * dy);
-    const quantity = scale ? dist / scale : dist;
-    const text = new fabric.IText(formatDistance(quantity), {
+    const qty = scale ? dist / scale : dist;
+    const text = new fabric.IText(formatDistance(qty), {
       left: (start.x + end.x) / 2,
       top: (start.y + end.y) / 2 - 15,
       fontSize: 12,
@@ -623,57 +262,28 @@ const FloorPlanMeasure: React.FC = () => {
       angle: angle * (180 / Math.PI)
     });
 
-    ghostLineRef.current = new fabric.Group([main, t1, t2, text], {
-      selectable: false,
-      evented: false
-    }) as any;
-
-    fabricRef.current.add(ghostLineRef.current!);
+    const group = new fabric.Group([main, t1, t2, text], { selectable: false, evented: false });
+    ghostLineRef.current = group;
+    fabricRef.current.add(group);
     fabricRef.current.requestRenderAll();
-  };
+  }, [scale, formatDistance, removeGhostLine]);
 
-  const removeGhostLine = () => {
-    if (ghostLineRef.current && fabricRef.current) {
-      fabricRef.current.remove(ghostLineRef.current);
-      ghostLineRef.current = null;
-      fabricRef.current.requestRenderAll();
-    }
-  };
-
-  const calculateArea = (points: Point[]) => {
-    if (points.length < 3) return 0;
-    let area = 0;
-    for (let i = 0; i < points.length; i++) {
-      const j = (i + 1) % points.length;
-      area += points[i].x * points[j].y;
-      area -= points[j].x * points[i].y;
-    }
-    const pixelArea = Math.abs(area) / 2;
-    // Area scale factor is squared (pixels per meter ^ 2)
-    return scale ? pixelArea / (scale * scale) : pixelArea;
-  };
-
-  const undo = () => {
+  // Command handlers
+  const undo = useCallback(() => {
     if (currentPoints.length > 0) {
-      // Undo last point
       const newPoints = currentPoints.slice(0, -1);
       setCurrentPoints(newPoints);
-
-      // Remove last temp line if drawing area
       if (tempLines.length > 0) {
-        const lastLine = tempLines[tempLines.length - 1];
-        fabricRef.current?.remove(lastLine);
+        const last = tempLines[tempLines.length - 1];
+        fabricRef.current?.remove(last);
         setTempLines(prev => prev.slice(0, -1));
       }
       return;
     }
-
     if (activeItemId) {
-      // Undo last measurement
       setTakeoffItems(prev => prev.map(item => {
         if (item.id === activeItemId && item.measurements.length > 0) {
           const lastM = item.measurements[item.measurements.length - 1];
-          // useEffect handles the visual removal from canvas
           return {
             ...item,
             measurements: item.measurements.slice(0, -1),
@@ -683,15 +293,14 @@ const FloorPlanMeasure: React.FC = () => {
         return item;
       }));
     }
-  };
+  }, [activeItemId, currentPoints, tempLines]);
 
-  const finishMeasurement = () => {
+  const finishMeasurement = useCallback(() => {
     if (activeItemId && currentPoints.length > 2) {
       const activeItem = takeoffItems.find(i => i.id === activeItemId);
       if (activeItem?.type === "area") {
         let area = calculateArea(currentPoints);
-        if (isDeductionMode) area = -area; // Subtract if deduction
-
+        if (isDeductionMode) area = -area;
         setTakeoffItems(prev => prev.map(i => {
           if (i.id === activeItemId) {
             const m: Measurement = { id: Math.random().toString(), points: [...currentPoints], quantity: area };
@@ -701,25 +310,14 @@ const FloorPlanMeasure: React.FC = () => {
         }));
       }
     }
-
-    // Clear temp lines
     tempLines.forEach(l => fabricRef.current?.remove(l));
     setTempLines([]);
     setCurrentPoints([]);
     removeGhostLine();
-  };
+  }, [activeItemId, currentPoints, isDeductionMode, takeoffItems, calculateArea, removeGhostLine, tempLines]);
 
-  const handleCanvasClick = (rawPoint: Point) => {
+  const handleCanvasClick = useCallback((point: Point) => {
     if (isSelectMode) return;
-    // Priority: Vertex Snap -> Ortho Snap
-    let point = getSnappedVertex(rawPoint);
-
-    if (calibrationMode && calibrationPoint1) {
-      point = getSnappedPoint(point, calibrationPoint1);
-    } else if (activeItemId && currentPoints.length > 0) {
-      point = getSnappedPoint(point, currentPoints[currentPoints.length - 1]);
-    }
-
     if (calibrationMode) {
       if (!calibrationPoint1) {
         setCalibrationPoint1(point);
@@ -733,7 +331,6 @@ const FloorPlanMeasure: React.FC = () => {
           setCalibrationMode(false);
           setCalibrationPoint1(null);
           setCalibrationLine({ p1: calibrationPoint1, p2: point, distance: dist });
-
           removeGhostLine();
         }
       }
@@ -741,7 +338,6 @@ const FloorPlanMeasure: React.FC = () => {
     }
 
     if (!activeItemId) return;
-
     const activeItem = takeoffItems.find(i => i.id === activeItemId);
     if (!activeItem) return;
 
@@ -757,11 +353,11 @@ const FloorPlanMeasure: React.FC = () => {
       if (currentPoints.length === 1) {
         const p1 = currentPoints[0];
         const dist = Math.sqrt(Math.pow(point.x - p1.x, 2) + Math.pow(point.y - p1.y, 2));
-        const quantity = scale ? dist / scale : dist;
+        const qty = scale ? dist / scale : dist;
         setTakeoffItems(prev => prev.map(i => {
           if (i.id === activeItemId) {
-            const m: Measurement = { id: Math.random().toString(), points: [p1, point], quantity };
-            return { ...i, measurements: [...i.measurements, m], totalQuantity: i.totalQuantity + quantity };
+            const m: Measurement = { id: Math.random().toString(), points: [p1, point], quantity: qty };
+            return { ...i, measurements: [...i.measurements, m], totalQuantity: i.totalQuantity + qty };
           }
           return i;
         }));
@@ -771,21 +367,239 @@ const FloorPlanMeasure: React.FC = () => {
         setCurrentPoints([point]);
       }
     } else if (activeItem.type === "area") {
-      const newPoints = [...currentPoints, point];
-      setCurrentPoints(newPoints);
-      if (newPoints.length > 1) {
-        const lastP = newPoints[newPoints.length - 2];
-        const line = new fabric.Line([lastP.x, lastP.y, point.x, point.y], {
-          stroke: activeItem.color, strokeWidth: 2, selectable: false, evented: false
-        });
+      const newPts = [...currentPoints, point];
+      setCurrentPoints(newPts);
+      if (newPts.length > 1) {
+        const last = newPts[newPts.length - 2];
+        const line = new fabric.Line([last.x, last.y, point.x, point.y], { stroke: activeItem.color, strokeWidth: 2, selectable: false, evented: false });
         fabricRef.current?.add(line);
         setTempLines(prev => [...prev, line]);
       }
     }
-  };
+  }, [isSelectMode, calibrationMode, calibrationPoint1, activeItemId, takeoffItems, parseDistance, calibrationDistance, scale, currentPoints, removeGhostLine]);
 
-  const renderTakeoffs = () => {
-    // Redraw all fabric objects for takeoffs
+  const handleCanvasMouseMove = useCallback((origPoint: Point) => {
+    if (!fabricRef.current) return;
+    const point = getSnappedVertex(origPoint);
+    let finalPoint = point;
+
+    if (calibrationMode && calibrationPoint1) {
+      finalPoint = getSnappedPoint(point, calibrationPoint1);
+      updateGhostLine(calibrationPoint1, finalPoint, "#ff0000");
+    } else if (activeItemId && currentPoints.length > 0) {
+      finalPoint = getSnappedPoint(point, currentPoints[currentPoints.length - 1]);
+      const activeItem = takeoffItems.find(i => i.id === activeItemId);
+      if (activeItem && (activeItem.type === "linear" || activeItem.type === "area")) {
+        updateGhostLine(currentPoints[currentPoints.length - 1], finalPoint, activeItem.color);
+      }
+    } else {
+      removeGhostLine();
+    }
+  }, [getSnappedVertex, calibrationMode, calibrationPoint1, activeItemId, currentPoints, getSnappedPoint, updateGhostLine, takeoffItems, removeGhostLine]);
+
+  // Sync Redraw Effect
+  useEffect(() => {
+    if (!fabricRef.current) return;
+    const canvas = fabricRef.current;
+    canvas.clear();
+    if (bgImageRef.current) canvas.backgroundImage = bgImageRef.current;
+
+    takeoffItems.forEach(item => {
+      item.measurements.forEach(m => {
+        if (item.type === 'linear' || item.type === 'polyline') {
+          for (let i = 0; i < m.points.length - 1; i++) {
+            drawDimensionProcedural(m.points[i], m.points[i + 1], item.color, item.name);
+          }
+        } else if (item.type === 'area') {
+          drawAreaProcedural(m.points, item.color, m.quantity);
+        } else if (item.type === 'count') {
+          m.points.forEach((p, idx) => drawCountProcedural(p, item.color, item.id, m.id, idx));
+        }
+      });
+    });
+
+    if (calibrationLine) {
+      drawDimensionProcedural(calibrationLine.p1, calibrationLine.p2, '#ff0000', `Scale Ref: ${formatDistance(calibrationLine.distance)}`);
+    }
+    canvas.requestRenderAll();
+  }, [takeoffItems, isSelectMode, scale, unitSystem, activeItemId, calibrationLine, drawAreaProcedural, drawCountProcedural, drawDimensionProcedural, formatDistance]);
+
+  // Event Listener Effect
+  useEffect(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+
+    const onMouseDown = (opt: fabric.TPointerEventInfo<fabric.TPointerEvent>) => {
+      const e = opt.e as MouseEvent;
+      if (isPanningMode) {
+        isDragging.current = true;
+        canvas.selection = false;
+        lastMousePos.current = { x: e.clientX, y: e.clientY };
+        canvas.defaultCursor = 'grabbing';
+        canvas.setCursor('grabbing');
+        return;
+      }
+      if (e.button === 2) { finishMeasurement(); return; }
+      const pointer = canvas.getScenePoint(e);
+      handleCanvasClick(pointer);
+    };
+
+    const onMouseMove = (opt: fabric.TPointerEventInfo<fabric.TPointerEvent>) => {
+      const e = opt.e as MouseEvent;
+      if (isPanningMode && isDragging.current) {
+        const vpt = [...(canvas.viewportTransform || [1, 0, 0, 1, 0, 0])];
+        vpt[4] += e.clientX - lastMousePos.current.x;
+        vpt[5] += e.clientY - lastMousePos.current.y;
+        canvas.setViewportTransform(vpt as [number, number, number, number, number, number]);
+        lastMousePos.current = { x: e.clientX, y: e.clientY };
+        return;
+      }
+      const pointer = canvas.getScenePoint(e);
+      handleCanvasMouseMove(pointer);
+    };
+
+    const onMouseUp = () => { isDragging.current = false; if (isPanningMode) { canvas.defaultCursor = 'grab'; canvas.setCursor('grab'); } };
+    const onDoubleClick = () => { if (!isPanningMode) finishMeasurement(); };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") finishMeasurement();
+      if (e.key === "Shift") setIsShiftPressed(true);
+      if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.preventDefault(); undo(); }
+      if (e.key.toLowerCase() === "v") { setIsSelectMode(p => !p); setIsPanningMode(false); }
+      if (e.key.toLowerCase() === "m") { setIsPanningMode(p => !p); setIsSelectMode(false); }
+      if (e.key.toLowerCase() === "x") setIsDeductionMode(p => !p);
+    };
+    const onKeyUp = (e: KeyboardEvent) => { if (e.key === "Shift") setIsShiftPressed(false); };
+    const onObjectModified = (opt: unknown) => {
+      const event = opt as { target?: fabric.Object };
+      const obj = event.target as fabric.Object & { data?: { takeoffItemId: string, measurementId: string, pointIndex?: number } };
+      if (!obj || !obj.data) return;
+      const { takeoffItemId, measurementId, pointIndex } = obj.data;
+      setTakeoffItems(prev => prev.map(item => {
+        if (item.id === takeoffItemId) {
+          return {
+            ...item,
+            measurements: item.measurements.map(m => {
+              if (m.id === measurementId && typeof pointIndex === 'number' && obj.left !== undefined && obj.top !== undefined) {
+                const newPts = [...m.points];
+                newPts[pointIndex] = { x: obj.left, y: obj.top };
+                return { ...m, points: newPts };
+              }
+              return m;
+            })
+          };
+        }
+        return item;
+      }));
+    };
+
+    const cur = isPanningMode ? 'grab' : (isSelectMode ? 'default' : 'crosshair');
+    canvas.defaultCursor = cur;
+    canvas.setCursor(cur);
+
+    canvas.on("mouse:down", onMouseDown);
+    canvas.on("mouse:move", onMouseMove);
+    canvas.on("mouse:up", onMouseUp);
+    canvas.on("mouse:dblclick", onDoubleClick);
+    canvas.on("object:modified", onObjectModified as (opt: unknown) => void);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+
+    return () => {
+      canvas.off("mouse:down", onMouseDown);
+      canvas.off("mouse:move", onMouseMove);
+      canvas.off("mouse:up", onMouseUp);
+      canvas.off("mouse:dblclick", onDoubleClick);
+      canvas.off("object:modified", onObjectModified as (opt: unknown) => void);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [isPanningMode, isSelectMode, finishMeasurement, handleCanvasClick, handleCanvasMouseMove, undo]);
+
+  // General Effects
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const { takeoffItems: sItems, scale: sScale } = JSON.parse(saved);
+        if (sItems) setTakeoffItems(sItems);
+        if (sScale) setScale(sScale);
+      } catch (e) { console.error(e); }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (takeoffItems.length > 0 || scale) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ takeoffItems, scale }));
+    }
+  }, [takeoffItems, scale]);
+
+  useEffect(() => {
+    setTakeoffItems(prev => prev.map(item => {
+      let u = item.unit;
+      if (unitSystem === 'metric') {
+        if (item.type === 'linear') u = 'm';
+        if (item.type === 'area') u = 'sqm';
+      } else {
+        if (item.type === 'linear') u = 'ft';
+        if (item.type === 'area') u = 'sqft';
+      }
+      return { ...item, unit: u };
+    }));
+  }, [unitSystem]);
+
+  const renderPage = useCallback(async (pageNumber: number, pdf: PDFJS.PDFDocumentProxy) => {
+    const page = await pdf.getPage(pageNumber);
+    const viewport = page.getViewport({ scale: 2 });
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    canvas.height = viewport.height;
+    canvas.width = viewport.width;
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const dataUrl = canvas.toDataURL();
+    if (fabricRef.current) {
+      fabric.Image.fromURL(dataUrl).then((img) => {
+        const containerWidth = containerRef.current?.offsetWidth || 800;
+        const scaleFactor = containerWidth / img.width!;
+        img.set({ scaleX: scaleFactor, scaleY: scaleFactor, selectable: false, evented: false });
+        fabricRef.current!.setDimensions({ width: containerWidth, height: img.height! * scaleFactor });
+        fabricRef.current!.clear();
+        bgImageRef.current = img;
+        fabricRef.current!.backgroundImage = img;
+        fabricRef.current!.requestRenderAll();
+      });
+    }
+  }, []);
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.type === "application/pdf" && pdfjs) {
+      const buffer = await file.arrayBuffer();
+      const pdf = await pdfjs.getDocument({ data: buffer }).promise;
+      setPdfDoc(pdf);
+      setNumPages(pdf.numPages);
+      setCurrentPage(1);
+      renderPage(1, pdf);
+    } else {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const dataUrl = ev.target?.result as string;
+        fabric.Image.fromURL(dataUrl).then((img) => {
+          const containerWidth = containerRef.current?.offsetWidth || 800;
+          const scaleFactor = containerWidth / img.width!;
+          img.set({ scaleX: scaleFactor, scaleY: scaleFactor, selectable: false, evented: false });
+          if (fabricRef.current) {
+            fabricRef.current.setDimensions({ width: containerWidth, height: img.height! * scaleFactor });
+            fabricRef.current.clear();
+            bgImageRef.current = img;
+            fabricRef.current.backgroundImage = img;
+            fabricRef.current.requestRenderAll();
+          }
+        });
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   const createTakeoffItem = (type: TakeoffMode) => {
@@ -794,19 +608,6 @@ const FloorPlanMeasure: React.FC = () => {
     setIsSelectMode(false);
     setCurrentPoints([]);
     setTempLines([]);
-
-    // Default assemblies for the demo
-    const defaultLinkedCosts = [];
-    if (type === 'area') {
-      defaultLinkedCosts.push({ costItemId: 'c1', ratio: 1 }); // Concrete
-      defaultLinkedCosts.push({ costItemId: 'c2', ratio: 1 }); // Labor
-    } else if (type === 'linear') {
-      defaultLinkedCosts.push({ costItemId: 'c3', ratio: 1 }); // Studs
-      defaultLinkedCosts.push({ costItemId: 'c4', ratio: 1 }); // Labor
-    } else if (type === 'count') {
-      defaultLinkedCosts.push({ costItemId: 'c6', ratio: 1 }); // Hardware
-    }
-
     const newItem: TakeoffItem = {
       id: Math.random().toString(36).substr(2, 9),
       name: `New ${type} ${takeoffItems.length + 1}`,
@@ -814,8 +615,8 @@ const FloorPlanMeasure: React.FC = () => {
       color: `#${Math.floor(Math.random() * 16777215).toString(16)}`,
       measurements: [],
       totalQuantity: 0,
-      unit: type === "area" ? "sqm" : type === "count" ? "ea" : "m",
-      linkedCosts: defaultLinkedCosts
+      unit: type === "area" ? (unitSystem === 'metric' ? "sqm" : "sqft") : type === "count" ? "ea" : (unitSystem === 'metric' ? "m" : "ft"),
+      linkedCosts: []
     };
     setTakeoffItems([...takeoffItems, newItem]);
     setActiveItemId(newItem.id);
@@ -826,20 +627,13 @@ const FloorPlanMeasure: React.FC = () => {
       <TakeoffSidebar
         items={takeoffItems}
         activeItemId={activeItemId}
-        onSelectItem={(id) => {
-          setActiveItemId(id);
-          setIsPanningMode(false);
-          setIsSelectMode(false);
-          setCurrentPoints([]);
-          setTempLines([]);
-        }}
+        onSelectItem={(id) => { setActiveItemId(id); setIsPanningMode(false); setIsSelectMode(false); setCurrentPoints([]); setTempLines([]); }}
         onCreateItem={createTakeoffItem}
         onDeleteItem={(id) => setTakeoffItems(prev => prev.filter(i => i.id !== id))}
         onUpdateItem={(id, updates) => setTakeoffItems(prev => prev.map(i => i.id === id ? { ...i, ...updates } : i))}
       />
 
       <div className="flex-1 flex flex-col relative overflow-hidden">
-        {/* Toolbar */}
         <div className="p-4 bg-white border-b border-gray-200 flex items-center justify-between shadow-sm z-10">
           <div className="flex items-center space-x-4">
             <label className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 cursor-pointer transition">
@@ -850,210 +644,112 @@ const FloorPlanMeasure: React.FC = () => {
 
             <div className="h-8 w-px bg-gray-200" />
 
-            <div className="flex items-center space-x-2">
-              <input
-                type="number"
-                placeholder="Scale Dist"
-                className="w-24 px-3 py-2 border rounded-lg text-sm"
-                value={calibrationDistance}
-                onChange={e => setCalibrationDistance(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') e.preventDefault(); }}
-              />
+            <div className="flex bg-gray-100 rounded-lg p-1 p-1">
               <button
-                type="button"
-                onClick={() => {
-                  if (!calibrationDistance || parseFloat(calibrationDistance) <= 0) {
-                    alert("Please enter a known distance first!");
-                    return;
-                  }
-                  setCalibrationMode(true);
-                  setCalibrationPoint1(null);
-                  setIsPanningMode(false);
-                }}
-                className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition ${calibrationMode ? 'bg-orange-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-                title="Calibrate (Shift+C)"
+                onClick={() => { setCalibrationMode(!calibrationMode); setCalibrationPoint1(null); }}
+                className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition ${calibrationMode ? 'bg-red-500 text-white animate-pulse' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
               >
                 <Ruler className="w-5 h-5" />
                 <span>Calibrate</span>
               </button>
-              <button
-                type="button"
-                onClick={() => setIsPanningMode(!isPanningMode)}
-                className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition ${isPanningMode ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-                title="Pan Tool (V)"
-              >
-                <Move className="w-5 h-5" />
-                <span>Pan</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setIsSelectMode(!isSelectMode);
-                  setIsPanningMode(false);
-                }}
-                className={`p-2 rounded-lg transition ${isSelectMode ? 'bg-blue-600 text-white shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-                title="Select/Move Tool (V)"
-              >
-                <MousePointer2 className="w-5 h-5" />
-              </button>
-
-              <div className="flex items-center bg-gray-100 rounded-lg p-1">
-                <button
-                  onClick={() => setUnitSystem('metric')}
-                  className={`px-3 py-1 text-[10px] font-bold rounded-md transition ${unitSystem === 'metric' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-                >
-                  METRIC (m)
-                </button>
-                <button
-                  onClick={() => setUnitSystem('imperial')}
-                  className={`px-3 py-1 text-[10px] font-bold rounded-md transition ${unitSystem === 'imperial' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-                >
-                  IMPERIAL (ft)
-                </button>
-              </div>
-
-              <div className="h-8 w-px bg-gray-200" />
-
-              <button
-                type="button"
-                onClick={() => setIsDeductionMode(!isDeductionMode)}
-                className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition ${isDeductionMode ? 'bg-red-500 text-white animate-pulse' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-                title="Deduct Mode (X)"
-              >
-                <Scissors className="w-5 h-5" />
-                <span>Deduct</span>
-              </button>
-
-              <div className="h-8 w-px bg-gray-200" />
-
-              <button
-                type="button"
-                onClick={undo}
-                className="p-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition"
-                title="Undo (Ctrl+Z)"
-              >
-                <Undo2 className="w-5 h-5" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (confirm("Clear all measurements?")) {
-                    setTakeoffItems(prev => prev.map(i => ({ ...i, measurements: [], totalQuantity: 0 })));
-                    fabricRef.current?.getObjects().forEach(obj => {
-                      if (obj !== fabricRef.current?.backgroundImage) {
-                        fabricRef.current?.remove(obj);
-                      }
-                    });
-                  }
-                }}
-                className="p-2 bg-gray-100 text-red-600 rounded-lg hover:bg-red-50 transition"
-                title="Clear All"
-              >
-                <RotateCcw className="w-5 h-5" />
-              </button>
+              {calibrationMode && (
+                <input
+                  type="text"
+                  placeholder={`Length (${unitSystem === 'metric' ? 'm' : "ft-in"})`}
+                  value={calibrationDistance}
+                  onChange={(e) => setCalibrationDistance(e.target.value)}
+                  className="ml-2 px-3 py-1 border rounded text-sm w-32 outline-none focus:ring-2 focus:ring-red-300"
+                />
+              )}
             </div>
+
+            <button
+              type="button"
+              onClick={() => { setIsPanningMode(!isPanningMode); setIsSelectMode(false); }}
+              className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition ${isPanningMode ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+              title="Pan Tool (M)"
+            >
+              <Move className="w-5 h-5" />
+              <span>Pan</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => { setIsSelectMode(!isSelectMode); setIsPanningMode(false); }}
+              className={`p-2 rounded-lg transition ${isSelectMode ? 'bg-blue-600 text-white shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+              title="Select/Move Tool (V)"
+            >
+              <MousePointer2 className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center bg-gray-100 rounded-lg p-1">
+              <button
+                onClick={() => setUnitSystem('metric')}
+                className={`px-3 py-1 text-[10px] font-bold rounded-md transition ${unitSystem === 'metric' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+              > METRIC </button>
+              <button
+                onClick={() => setUnitSystem('imperial')}
+                className={`px-3 py-1 text-[10px] font-bold rounded-md transition ${unitSystem === 'imperial' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+              > IMPERIAL </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsDeductionMode(!isDeductionMode)}
+              className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition ${isDeductionMode ? 'bg-red-500 text-white animate-pulse' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+              title="Deduct Mode (X)"
+            >
+              <Scissors className="w-5 h-5" />
+              <span>Deduct</span>
+            </button>
           </div>
 
           <div className="flex items-center space-x-2">
-            {numPages > 1 && (
-              <div className="flex items-center space-x-2 mr-4">
-                <button
-                  type="button"
-                  disabled={currentPage === 1}
-                  onClick={() => {
-                    const next = currentPage - 1;
-                    setCurrentPage(next);
-                    if (pdfDoc) renderPage(next, pdfDoc);
-                  }}
-                  className="p-2 disabled:opacity-30"
-                >
-                  <ChevronLeft />
-                </button>
-                <span className="text-sm font-medium">Page {currentPage} of {numPages}</span>
-                <button
-                  type="button"
-                  disabled={currentPage === numPages}
-                  onClick={() => {
-                    const next = currentPage + 1;
-                    setCurrentPage(next);
-                    if (pdfDoc) renderPage(next, pdfDoc);
-                  }}
-                  className="p-2 disabled:opacity-30"
-                >
-                  <ChevronRight />
-                </button>
-              </div>
-            )}
+            <button onClick={undo} className="p-2 hover:bg-gray-100 rounded-lg transition" title="Undo (Ctrl+Z)"> <Undo2 className="w-5 h-5 text-gray-600" /> </button>
             <button
-              type="button"
-              onClick={() => {
-                if (fabricRef.current) {
-                  const zoom = fabricRef.current.getZoom();
-                  fabricRef.current.setZoom(zoom * 1.1);
-                }
-              }}
-              className="p-2 bg-white border rounded-lg hover:bg-gray-50"
+              onClick={() => { if (confirm("Clear all measurements?")) { setTakeoffItems([]); setScale(null); setCalibrationLine(null); } }}
+              className="p-2 hover:bg-red-50 rounded-lg transition"
+              title="Clear All"
             >
-              <ZoomIn className="w-5 h-5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (fabricRef.current) {
-                  const zoom = fabricRef.current.getZoom();
-                  fabricRef.current.setZoom(zoom / 1.1);
-                }
-              }}
-              className="p-2 bg-white border rounded-lg hover:bg-gray-50"
-            >
-              <ZoomOut className="w-5 h-5" />
+              <RotateCcw className="w-5 h-5 text-red-500" />
             </button>
           </div>
         </div>
 
-        {/* Main Workspace Area (Canvas + Estimation) */}
-        <div className="flex-1 flex flex-row overflow-hidden">
-          {/* Canvas Viewport */}
-          <div ref={containerRef} className="flex-1 relative overflow-auto p-8 bg-gray-200/50 scrollbar-hide">
-            <div className="inline-block shadow-2xl bg-white">
-              <canvas ref={canvasRef} />
+        <div className="flex-1 relative flex overflow-hidden">
+          <div ref={containerRef} className="flex-1 bg-gray-200 relative overflow-hidden" onContextMenu={(e) => e.preventDefault()}>
+            <canvas ref={canvasRef} />
+
+            <div className="absolute bottom-6 right-6 flex items-center space-x-2 bg-white/80 backdrop-blur p-2 rounded-xl shadow-xl border border-white/50">
+              <button onClick={() => fabricRef.current?.setZoom((fabricRef.current.getZoom() || 1) * 1.1)} className="p-2 hover:bg-gray-100 rounded-lg"> <ZoomIn className="w-5 h-5" /> </button>
+              <button onClick={() => fabricRef.current?.setZoom((fabricRef.current.getZoom() || 1) / 1.1)} className="p-2 hover:bg-gray-100 rounded-lg"> <ZoomOut className="w-5 h-5" /> </button>
             </div>
 
-            {calibrationMode && (
-              <div className="absolute top-12 left-1/2 -translate-x-1/2 bg-orange-600 text-white px-6 py-3 rounded-full shadow-lg z-20 animate-bounce">
-                {calibrationPoint1 ? "Click second point to finish calibration" : "Click first point to start calibration"}
+            {pdfDoc && (
+              <div className="absolute bottom-6 left-6 flex items-center space-x-4 bg-white/80 backdrop-blur p-2 rounded-xl shadow-xl border border-white/50">
+                <button onClick={() => { if (currentPage > 1) { setCurrentPage(p => p - 1); renderPage(currentPage - 1, pdfDoc); } }} className="p-1 hover:bg-gray-100 rounded-lg"> <ChevronLeft /> </button>
+                <span className="text-sm font-bold">Page {currentPage} of {numPages}</span>
+                <button onClick={() => { if (currentPage < numPages) { setCurrentPage(p => p + 1); renderPage(currentPage + 1, pdfDoc); } }} className="p-1 hover:bg-gray-100 rounded-lg"> <ChevronRight /> </button>
               </div>
             )}
 
             {isShiftPressed && (
-              <div className="absolute bottom-12 left-1/2 -translate-x-1/2 bg-blue-600/80 backdrop-blur text-white px-4 py-2 rounded-full shadow-lg z-20 text-xs font-bold uppercase tracking-widest">
-                Precision Mode Active (Snapped)
-              </div>
+              <div className="absolute bottom-12 left-1/2 -translate-x-1/2 bg-blue-600/80 backdrop-blur text-white px-4 py-2 rounded-full shadow-lg z-20 text-xs font-bold uppercase tracking-widest"> Precision Mode Active (Snapped) </div>
             )}
-
             {isDeductionMode && (
-              <div className="absolute top-24 left-1/2 -translate-x-1/2 bg-red-600 text-white px-4 py-2 rounded-full shadow-lg z-20 text-xs font-bold uppercase tracking-widest animate-pulse border-2 border-white shadow-red-500/50">
-                Deduction Mode Active (Subtracting Area)
-              </div>
+              <div className="absolute top-24 left-1/2 -translate-x-1/2 bg-red-600 text-white px-4 py-2 rounded-full shadow-lg z-20 text-xs font-bold uppercase tracking-widest animate-pulse border-2 border-white shadow-red-500/50"> Deduction Mode Active (Subtracting Area) </div>
             )}
 
             {snappedVertex && (
               <div
                 className="fixed pointer-events-none z-50 w-4 h-4 rounded-full border-2 border-orange-500 bg-orange-500/30"
                 style={{
-                  left: (snappedVertex.x * (fabricRef.current?.getZoom() || 1)) + (fabricRef.current?.viewportTransform?.[4] || 0) + containerRef.current?.getBoundingClientRect().left! - 8,
-                  top: (snappedVertex.y * (fabricRef.current?.getZoom() || 1)) + (fabricRef.current?.viewportTransform?.[5] || 0) + containerRef.current?.getBoundingClientRect().top! - 8,
+                  left: (snappedVertex.x * (fabricRef.current?.getZoom() || 1)) + (fabricRef.current?.viewportTransform?.[4] || 0) + (containerRef.current?.getBoundingClientRect().left || 0) - 8,
+                  top: (snappedVertex.y * (fabricRef.current?.getZoom() || 1)) + (fabricRef.current?.viewportTransform?.[5] || 0) + (containerRef.current?.getBoundingClientRect().top || 0) - 8,
                 }}
               />
             )}
           </div>
-
-          {/* <EstimationPanel
-            items={takeoffItems}
-            catalog={costCatalog}
-          /> */}
         </div>
       </div>
     </div>
