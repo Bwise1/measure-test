@@ -6,6 +6,8 @@ import type * as PDFJS from "pdfjs-dist";
 import { Point, Measurement, TakeoffItem, TakeoffMode } from "./types";
 import { ZoomIn, ZoomOut, Move, Ruler, FileUp, ChevronLeft, ChevronRight, Scissors, Undo2, RotateCcw, MousePointer2 } from "lucide-react";
 import TakeoffSidebar from "./TakeoffSidebar";
+import { db } from "../db";
+import { useLiveQuery } from "dexie-react-hooks";
 
 const FloorPlanMeasure: React.FC = () => {
   const [pdfjs, setPdfjs] = useState<typeof PDFJS | null>(null);
@@ -55,8 +57,10 @@ const FloorPlanMeasure: React.FC = () => {
   const isDragging = useRef(false);
   const lastMousePos = useRef({ x: 0, y: 0 });
 
-  // Persistence Key
-  const STORAGE_KEY = 'bwise_takeoff_data';
+  // Persistence logic with Dexie
+  const projectState = useLiveQuery(() => db.projectState.get('current'));
+  const isStateLoaded = useRef(false);
+
 
   // Unit Helpers
   const parseDistance = useCallback((input: string): number => {
@@ -129,13 +133,14 @@ const FloorPlanMeasure: React.FC = () => {
     if (!isShiftPressed) return currentPoint;
     const dx = currentPoint.x - lastPoint.x;
     const dy = currentPoint.y - lastPoint.y;
-    const angle = Math.atan2(dy, dx) * 180 / Math.PI;
-    const snappedAngle = Math.round(angle / 45) * 45;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    return {
-      x: lastPoint.x + dist * Math.cos(snappedAngle * Math.PI / 180),
-      y: lastPoint.y + dist * Math.sin(snappedAngle * Math.PI / 180)
-    };
+    // Snap to horizontal or vertical (90° increments) for straighter lines
+    if (Math.abs(dx) > Math.abs(dy)) {
+      // Horizontal line
+      return { x: currentPoint.x, y: lastPoint.y };
+    } else {
+      // Vertical line
+      return { x: lastPoint.x, y: currentPoint.y };
+    }
   }, [isShiftPressed]);
 
   // Procedural Drawing Helpers
@@ -316,21 +321,27 @@ const FloorPlanMeasure: React.FC = () => {
     removeGhostLine();
   }, [activeItemId, currentPoints, isDeductionMode, takeoffItems, calculateArea, removeGhostLine, tempLines]);
 
-  const handleCanvasClick = useCallback((point: Point) => {
+  const handleCanvasClick = useCallback((rawPoint: Point) => {
     if (isSelectMode) return;
+
+    // Apply vertex snapping first (snap to existing points)
+    const point = getSnappedVertex(rawPoint);
+
     if (calibrationMode) {
       if (!calibrationPoint1) {
         setCalibrationPoint1(point);
       } else {
-        const dx = point.x - calibrationPoint1.x;
-        const dy = point.y - calibrationPoint1.y;
+        // Apply angle snapping for calibration second point
+        const snappedPoint = getSnappedPoint(point, calibrationPoint1);
+        const dx = snappedPoint.x - calibrationPoint1.x;
+        const dy = snappedPoint.y - calibrationPoint1.y;
         const pixelDist = Math.sqrt(dx * dx + dy * dy);
         const dist = parseDistance(calibrationDistance);
         if (dist > 0) {
           setScale(pixelDist / dist);
           setCalibrationMode(false);
           setCalibrationPoint1(null);
-          setCalibrationLine({ p1: calibrationPoint1, p2: point, distance: dist });
+          setCalibrationLine({ p1: calibrationPoint1, p2: snappedPoint, distance: dist });
           removeGhostLine();
         }
       }
@@ -352,11 +363,15 @@ const FloorPlanMeasure: React.FC = () => {
     } else if (activeItem.type === "linear") {
       if (currentPoints.length === 1) {
         const p1 = currentPoints[0];
-        const dist = Math.sqrt(Math.pow(point.x - p1.x, 2) + Math.pow(point.y - p1.y, 2));
+        // Apply angle snapping for the second point
+        const snappedPoint = getSnappedPoint(point, p1);
+        const dx = snappedPoint.x - p1.x;
+        const dy = snappedPoint.y - p1.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
         const qty = scale ? dist / scale : dist;
         setTakeoffItems(prev => prev.map(i => {
           if (i.id === activeItemId) {
-            const m: Measurement = { id: Math.random().toString(), points: [p1, point], quantity: qty };
+            const m: Measurement = { id: Math.random().toString(), points: [p1, snappedPoint], quantity: qty };
             return { ...i, measurements: [...i.measurements, m], totalQuantity: i.totalQuantity + qty };
           }
           return i;
@@ -367,16 +382,20 @@ const FloorPlanMeasure: React.FC = () => {
         setCurrentPoints([point]);
       }
     } else if (activeItem.type === "area") {
-      const newPts = [...currentPoints, point];
+      // Apply angle snapping for area points if there's a previous point
+      const snappedPoint = currentPoints.length > 0
+        ? getSnappedPoint(point, currentPoints[currentPoints.length - 1])
+        : point;
+      const newPts = [...currentPoints, snappedPoint];
       setCurrentPoints(newPts);
       if (newPts.length > 1) {
         const last = newPts[newPts.length - 2];
-        const line = new fabric.Line([last.x, last.y, point.x, point.y], { stroke: activeItem.color, strokeWidth: 2, selectable: false, evented: false });
+        const line = new fabric.Line([last.x, last.y, snappedPoint.x, snappedPoint.y], { stroke: activeItem.color, strokeWidth: 2, selectable: false, evented: false });
         fabricRef.current?.add(line);
         setTempLines(prev => [...prev, line]);
       }
     }
-  }, [isSelectMode, calibrationMode, calibrationPoint1, activeItemId, takeoffItems, parseDistance, calibrationDistance, scale, currentPoints, removeGhostLine]);
+  }, [isSelectMode, calibrationMode, calibrationPoint1, activeItemId, takeoffItems, parseDistance, calibrationDistance, scale, currentPoints, removeGhostLine, getSnappedVertex, getSnappedPoint]);
 
   const handleCanvasMouseMove = useCallback((origPoint: Point) => {
     if (!fabricRef.current) return;
@@ -397,12 +416,38 @@ const FloorPlanMeasure: React.FC = () => {
     }
   }, [getSnappedVertex, calibrationMode, calibrationPoint1, activeItemId, currentPoints, getSnappedPoint, updateGhostLine, takeoffItems, removeGhostLine]);
 
+  // Canvas Initialization Effect
+  useEffect(() => {
+    if (!containerRef.current || !canvasRef.current || fabricRef.current) return;
+
+    const canvas = new fabric.Canvas(canvasRef.current, {
+      width: containerRef.current.offsetWidth || 800,
+      height: containerRef.current.offsetHeight || 600,
+      backgroundColor: '#f8f8f8',
+      selection: false,
+      preserveObjectStacking: true,
+    });
+
+    fabricRef.current = canvas;
+
+    return () => {
+      canvas.dispose();
+      fabricRef.current = null;
+    };
+  }, []);
+
   // Sync Redraw Effect
   useEffect(() => {
     if (!fabricRef.current) return;
     const canvas = fabricRef.current;
-    canvas.clear();
-    if (bgImageRef.current) canvas.backgroundImage = bgImageRef.current;
+
+    // Clear all objects but preserve background
+    canvas.getObjects().forEach(obj => canvas.remove(obj));
+
+    // Restore Background from Ref if it exists
+    if (bgImageRef.current) {
+      canvas.backgroundImage = bgImageRef.current;
+    }
 
     takeoffItems.forEach(item => {
       item.measurements.forEach(m => {
@@ -515,23 +560,69 @@ const FloorPlanMeasure: React.FC = () => {
     };
   }, [isPanningMode, isSelectMode, finishMeasurement, handleCanvasClick, handleCanvasMouseMove, undo]);
 
-  // General Effects
+  // Persistence Migration and Auto-save
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        const { takeoffItems: sItems, scale: sScale } = JSON.parse(saved);
-        if (sItems) setTakeoffItems(sItems);
-        if (sScale) setScale(sScale);
-      } catch (e) { console.error(e); }
+    if (projectState && !isStateLoaded.current) {
+      console.log("Loading state from Dexie...");
+      if (projectState.takeoffItems) setTakeoffItems(projectState.takeoffItems);
+      if (projectState.scale) setScale(projectState.scale);
+      if (projectState.calibrationLine) setCalibrationLine(projectState.calibrationLine);
+
+      if (projectState.backgroundImage) {
+        fabric.FabricImage.fromURL(projectState.backgroundImage).then((img) => {
+          bgImageRef.current = img;
+          if (fabricRef.current) {
+            const containerWidth = containerRef.current?.offsetWidth || 800;
+            const imgWidth = img.width || 100;
+            const scaleFactor = containerWidth / imgWidth;
+            img.set({
+              scaleX: scaleFactor,
+              scaleY: scaleFactor,
+              selectable: false,
+              evented: false,
+              left: 0,
+              top: 0,
+              originX: 'left',
+              originY: 'top'
+            });
+            fabricRef.current.setDimensions({
+              width: containerWidth,
+              height: (img.height || imgWidth) * scaleFactor
+            });
+            fabricRef.current.backgroundImage = img;
+            fabricRef.current.requestRenderAll();
+          }
+        });
+      }
+      isStateLoaded.current = true;
+    } else if (!projectState && !isStateLoaded.current) {
+      // Check legacy localStorage
+      const legacy = localStorage.getItem('bwise_takeoff_data');
+      if (legacy) {
+        try {
+          const { takeoffItems: sItems, scale: sScale } = JSON.parse(legacy);
+          db.projectState.put({ id: 'current', takeoffItems: sItems || [], scale: sScale || null });
+          localStorage.removeItem('bwise_takeoff_data');
+        } catch (e) { console.error("Legacy migration failed", e); }
+      }
+      isStateLoaded.current = true;
     }
-  }, []);
+  }, [projectState]);
 
   useEffect(() => {
-    if (takeoffItems.length > 0 || scale) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ takeoffItems, scale }));
-    }
-  }, [takeoffItems, scale]);
+    if (!isStateLoaded.current) return;
+    const saveState = async () => {
+      // Note: We avoid toDataURL here to keep clicking smooth. 
+      // Background is saved only when it's first loaded/changed.
+      await db.projectState.update('current', {
+        takeoffItems,
+        scale,
+        calibrationLine
+      });
+    };
+    const timer = setTimeout(saveState, 500); // Shorter debounce for responsiveness
+    return () => clearTimeout(timer);
+  }, [takeoffItems, scale, calibrationLine]);
 
   useEffect(() => {
     setTakeoffItems(prev => prev.map(item => {
@@ -548,32 +639,69 @@ const FloorPlanMeasure: React.FC = () => {
   }, [unitSystem]);
 
   const renderPage = useCallback(async (pageNumber: number, pdf: PDFJS.PDFDocumentProxy) => {
+    console.log("Rendering page:", pageNumber);
     const page = await pdf.getPage(pageNumber);
     const viewport = page.getViewport({ scale: 2 });
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+
     canvas.height = viewport.height;
     canvas.width = viewport.width;
+
     await page.render({ canvasContext: ctx, viewport }).promise;
     const dataUrl = canvas.toDataURL();
+
     if (fabricRef.current) {
-      fabric.Image.fromURL(dataUrl).then((img) => {
-        const containerWidth = containerRef.current?.offsetWidth || 800;
-        const scaleFactor = containerWidth / img.width!;
-        img.set({ scaleX: scaleFactor, scaleY: scaleFactor, selectable: false, evented: false });
-        fabricRef.current!.setDimensions({ width: containerWidth, height: img.height! * scaleFactor });
-        fabricRef.current!.clear();
-        bgImageRef.current = img;
-        fabricRef.current!.backgroundImage = img;
-        fabricRef.current!.requestRenderAll();
+      console.log("PDF DataURL created, length:", dataUrl.length);
+      const img = await fabric.FabricImage.fromURL(dataUrl);
+      console.log("Image loaded from dataUrl, dimensions:", img.width, img.height);
+
+      const containerWidth = containerRef.current?.offsetWidth || 800;
+      const imgWidth = img.width || 100;
+      const scaleFactor = containerWidth / imgWidth;
+
+      img.set({
+        scaleX: scaleFactor,
+        scaleY: scaleFactor,
+        selectable: false,
+        evented: false,
+        left: 0,
+        top: 0,
+        originX: 'left',
+        originY: 'top'
       });
+
+      fabricRef.current.setViewportTransform([1, 0, 0, 1, 0, 0]);
+      fabricRef.current.setZoom(1);
+
+      fabricRef.current.setDimensions({
+        width: containerWidth,
+        height: (img.height || imgWidth) * scaleFactor
+      });
+
+      // Clear measurements when changing page? 
+      // For now just ensure the background is set correctly
+      fabricRef.current.getObjects().forEach(obj => fabricRef.current?.remove(obj));
+
+      bgImageRef.current = img;
+      fabricRef.current.backgroundImage = img;
+
+      // Save background to DB once
+      const bgData = img.toDataURL({ format: 'jpeg', quality: 0.8 });
+      db.projectState.update('current', { backgroundImage: bgData });
+
+      fabricRef.current.requestRenderAll();
+      setTimeout(() => fabricRef.current?.requestRenderAll(), 100);
     }
   }, []);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    console.log("File uploaded:", file.name, file.type);
+
     if (file.type === "application/pdf" && pdfjs) {
       const buffer = await file.arrayBuffer();
       const pdf = await pdfjs.getDocument({ data: buffer }).promise;
@@ -581,22 +709,48 @@ const FloorPlanMeasure: React.FC = () => {
       setNumPages(pdf.numPages);
       setCurrentPage(1);
       renderPage(1, pdf);
-    } else {
+    } else if (file.type.startsWith("image/")) {
       const reader = new FileReader();
-      reader.onload = (ev) => {
+      reader.onload = async (ev) => {
         const dataUrl = ev.target?.result as string;
-        fabric.Image.fromURL(dataUrl).then((img) => {
+        if (fabricRef.current) {
+          const img = await fabric.FabricImage.fromURL(dataUrl);
+          console.log("Static image loaded, dimensions:", img.width, img.height);
+
           const containerWidth = containerRef.current?.offsetWidth || 800;
-          const scaleFactor = containerWidth / img.width!;
-          img.set({ scaleX: scaleFactor, scaleY: scaleFactor, selectable: false, evented: false });
-          if (fabricRef.current) {
-            fabricRef.current.setDimensions({ width: containerWidth, height: img.height! * scaleFactor });
-            fabricRef.current.clear();
-            bgImageRef.current = img;
-            fabricRef.current.backgroundImage = img;
-            fabricRef.current.requestRenderAll();
-          }
-        });
+          const imgWidth = img.width || 100;
+          const scaleFactor = containerWidth / imgWidth;
+
+          img.set({
+            scaleX: scaleFactor,
+            scaleY: scaleFactor,
+            selectable: false,
+            evented: false,
+            left: 0,
+            top: 0,
+            originX: 'left',
+            originY: 'top'
+          });
+
+          fabricRef.current.setViewportTransform([1, 0, 0, 1, 0, 0]);
+          fabricRef.current.setZoom(1);
+
+          fabricRef.current.setDimensions({
+            width: containerWidth,
+            height: (img.height || imgWidth) * scaleFactor
+          });
+
+          fabricRef.current.getObjects().forEach(obj => fabricRef.current?.remove(obj));
+          bgImageRef.current = img;
+          fabricRef.current.backgroundImage = img;
+
+          // Save background to DB once
+          const bgData = img.toDataURL({ format: 'jpeg', quality: 0.8 });
+          db.projectState.update('current', { backgroundImage: bgData });
+
+          fabricRef.current.requestRenderAll();
+          setTimeout(() => fabricRef.current?.requestRenderAll(), 100);
+        }
       };
       reader.readAsDataURL(file);
     }
