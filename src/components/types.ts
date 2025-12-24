@@ -33,4 +33,5 @@ export interface Measurement {
   id: string;
   points: Point[];
   quantity: number;
+  page: number;
 }

@@ -6,6 +6,7 @@ import { Ruler, Square, Hash, Trash2, Plus } from "lucide-react";
 
 interface TakeoffSidebarProps {
     items: TakeoffItem[];
+    scales?: Record<number, number>;
     activeItemId: string | null;
     onSelectItem: (id: string) => void;
     onCreateItem: (type: TakeoffMode) => void;
@@ -15,6 +16,7 @@ interface TakeoffSidebarProps {
 
 const TakeoffSidebar: React.FC<TakeoffSidebarProps> = ({
     items,
+    scales = {},
     activeItemId,
     onSelectItem,
     onCreateItem,
@@ -40,51 +42,69 @@ const TakeoffSidebar: React.FC<TakeoffSidebarProps> = ({
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                {items.map((item) => (
-                    <div
-                        key={item.id}
-                        onClick={() => onSelectItem(item.id)}
-                        className={`group p-3 rounded-xl border transition-all cursor-pointer ${activeItemId === item.id
-                            ? "bg-blue-50 border-blue-200 shadow-sm"
-                            : "bg-white border-gray-100 hover:border-blue-100 hover:bg-gray-50"
-                            }`}
-                    >
-                        <div className="flex items-center justify-between mb-2">
-                            <div className="flex items-center space-x-2">
-                                <div
-                                    className="w-3 h-3 rounded-full mr-1"
-                                    style={{ backgroundColor: item.color }}
-                                />
-                                <input
-                                    type="text"
-                                    value={item.name}
-                                    onChange={(e) => onUpdateItem(item.id, { name: e.target.value })}
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="bg-transparent font-semibold text-gray-700 text-sm border-none focus:ring-0 w-full p-0"
-                                />
+                {items.map((item) => {
+                    const pages = Array.from(new Set(item.measurements.map(m => m.page))).sort((a, b) => a - b);
+                    return (
+                        <div
+                            key={item.id}
+                            onClick={() => onSelectItem(item.id)}
+                            className={`group p-3 rounded-xl border transition-all cursor-pointer ${activeItemId === item.id
+                                ? "bg-blue-50 border-blue-200 shadow-sm"
+                                : "bg-white border-gray-100 hover:border-blue-100 hover:bg-gray-50"
+                                }`}
+                        >
+                            <div className="flex items-center justify-between mb-2">
+                                <div className="flex items-center space-x-2">
+                                    <div
+                                        className="w-3 h-3 rounded-full mr-1"
+                                        style={{ backgroundColor: item.color }}
+                                    />
+                                    <input
+                                        type="text"
+                                        value={item.name}
+                                        onChange={(e) => onUpdateItem(item.id, { name: e.target.value })}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="bg-transparent font-semibold text-gray-700 text-sm border-none focus:ring-0 w-full p-0"
+                                    />
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        onDeleteItem(item.id);
+                                    }}
+                                    className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 transition-opacity"
+                                >
+                                    <Trash2 className="w-4 h-4" />
+                                </button>
                             </div>
-                            <button
-                                type="button"
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    onDeleteItem(item.id);
-                                }}
-                                className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 transition-opacity"
-                            >
-                                <Trash2 className="w-4 h-4" />
-                            </button>
-                        </div>
-                        <div className="flex items-center justify-between text-xs text-gray-500">
-                            <div className="flex items-center space-x-1">
-                                {getIcon(item.type)}
-                                <span>{item.type}</span>
+
+                            {pages.length > 0 && (
+                                <div className="flex flex-wrap gap-1 mb-2">
+                                    {pages.map(p => (
+                                        <div key={p} className="flex items-center space-x-1 px-1.5 py-0.5 bg-gray-100 rounded text-[10px] text-gray-600 border border-gray-200">
+                                            <span>Pg {p}</span>
+                                            <div
+                                                className={`w-1.5 h-1.5 rounded-full ${scales[p] ? 'bg-green-500' : 'bg-red-400 animate-pulse'}`}
+                                                title={scales[p] ? 'Calibrated' : 'Uncalibrated'}
+                                            />
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            <div className="flex items-center justify-between text-xs text-gray-500">
+                                <div className="flex items-center space-x-1">
+                                    {getIcon(item.type)}
+                                    <span>{item.type}</span>
+                                </div>
+                                <span className="font-mono bg-white px-2 py-0.5 rounded border border-gray-100">
+                                    {item.totalQuantity.toFixed(2)} {item.unit}
+                                </span>
                             </div>
-                            <span className="font-mono bg-white px-2 py-0.5 rounded border border-gray-100">
-                                {item.totalQuantity.toFixed(2)} {item.unit}
-                            </span>
                         </div>
-                    </div>
-                ))}
+                    );
+                })}
             </div>
 
             <div className="p-4 border-t border-gray-200 bg-gray-50/50 grid grid-cols-2 gap-2">

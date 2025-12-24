@@ -4,7 +4,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import * as fabric from "fabric";
 import type * as PDFJS from "pdfjs-dist";
 import { Point, Measurement, TakeoffItem, TakeoffMode } from "./types";
-import { ZoomIn, ZoomOut, Move, Ruler, FileUp, ChevronLeft, ChevronRight, Scissors, Undo2, RotateCcw, MousePointer2 } from "lucide-react";
+import { ZoomIn, ZoomOut, Move, Ruler, FileUp, ChevronLeft, ChevronRight, Scissors, Undo2, RotateCcw, MousePointer2, Check, AlertCircle } from "lucide-react";
 import TakeoffSidebar from "./TakeoffSidebar";
 import { db } from "../db";
 import { useLiveQuery } from "dexie-react-hooks";
@@ -26,11 +26,11 @@ const FloorPlanMeasure: React.FC = () => {
     loadPdfjs();
   }, []);
 
-  const [scale, setScale] = useState<number | null>(null);
+  const [scales, setScales] = useState<Record<number, number>>({});
   const [calibrationMode, setCalibrationMode] = useState<boolean>(false);
   const [calibrationPoint1, setCalibrationPoint1] = useState<Point | null>(null);
   const [calibrationDistance, setCalibrationDistance] = useState<string>("");
-  const [calibrationLine, setCalibrationLine] = useState<{ p1: Point, p2: Point, distance: number } | null>(null);
+  const [calibrationLines, setCalibrationLines] = useState<Record<number, { p1: Point, p2: Point, distance: number }>>({});
 
   const [takeoffItems, setTakeoffItems] = useState<TakeoffItem[]>([]);
   const [activeItemId, setActiveItemId] = useState<string | null>(null);
@@ -38,6 +38,9 @@ const FloorPlanMeasure: React.FC = () => {
   const [numPages, setNumPages] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [pdfDoc, setPdfDoc] = useState<PDFJS.PDFDocumentProxy | null>(null);
+
+  const currentScale = scales[currentPage] || null;
+  const currentCalibrationLine = calibrationLines[currentPage] || null;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricRef = useRef<fabric.Canvas | null>(null);
@@ -55,7 +58,7 @@ const FloorPlanMeasure: React.FC = () => {
   const [snappedVertex, setSnappedVertex] = useState<Point | null>(null);
 
   const isDragging = useRef(false);
-  const lastMousePos = useRef({ x: 0, y: 0 });
+  const lastMousePos = useRef<Point>({ x: 0, y: 0 });
 
   // Persistence logic with Dexie
   const projectState = useLiveQuery(() => db.projectState.get('current'));
@@ -95,8 +98,9 @@ const FloorPlanMeasure: React.FC = () => {
       area += (p1.x * p2.y - p2.x * p1.y);
     }
     const pixelArea = Math.abs(area / 2);
-    return scale ? pixelArea / (scale * scale) : pixelArea;
-  }, [scale]);
+    const currentPageScale = scales[currentPage];
+    return currentPageScale ? pixelArea / (currentPageScale * currentPageScale) : pixelArea;
+  }, [scales, currentPage]);
 
   const getSnappedVertex = useCallback((currentPointer: Point): Point => {
     const snapThreshold = 15;
@@ -152,17 +156,15 @@ const FloorPlanMeasure: React.FC = () => {
     const tickLen = 6;
 
     const main = new fabric.Line([p1.x, p1.y, p2.x, p2.y], { stroke: color, strokeWidth: 2, selectable: false, evented: false });
-    const t1 = new fabric.Line([
-      p1.x - Math.sin(angle) * tickLen, p1.y + Math.cos(angle) * tickLen,
-      p1.x + Math.sin(angle) * tickLen, p1.y - Math.cos(angle) * tickLen
-    ], { stroke: color, strokeWidth: 2, selectable: false, evented: false });
-    const t2 = new fabric.Line([
-      p2.x - Math.sin(angle) * tickLen, p2.y + Math.cos(angle) * tickLen,
-      p2.x + Math.sin(angle) * tickLen, p2.y - Math.cos(angle) * tickLen
-    ], { stroke: color, strokeWidth: 2, selectable: false, evented: false });
+
+    // Correcting ticks to be perpendicular
+    const tickDX = Math.sin(angle) * tickLen;
+    const tickDY = Math.cos(angle) * tickLen;
+    const t1 = new fabric.Line([p1.x - tickDX, p1.y + tickDY, p1.x + tickDX, p1.y - tickDY], { stroke: color, strokeWidth: 2, selectable: false, evented: false });
+    const t2 = new fabric.Line([p2.x - tickDX, p2.y + tickDY, p2.x + tickDX, p2.y - tickDY], { stroke: color, strokeWidth: 2, selectable: false, evented: false });
 
     const dist = Math.sqrt(dx * dx + dy * dy);
-    const qty = scale ? dist / scale : dist;
+    const qty = currentScale ? dist / currentScale : dist;
     const label = `${name ? name + ': ' : ''}${formatDistance(qty)}`;
     const text = new fabric.IText(label, {
       left: (p1.x + p2.x) / 2,
@@ -177,7 +179,7 @@ const FloorPlanMeasure: React.FC = () => {
       angle: angle * (180 / Math.PI)
     });
     fabricRef.current.add(main, t1, t2, text);
-  }, [scale, formatDistance]);
+  }, [currentScale, formatDistance]);
 
   const drawAreaProcedural = useCallback((points: Point[], color: string, quantity: number) => {
     if (!fabricRef.current) return;
@@ -243,17 +245,15 @@ const FloorPlanMeasure: React.FC = () => {
     const tickLen = 6;
 
     const main = new fabric.Line([start.x, start.y, end.x, end.y], { stroke: color, strokeWidth: 2, strokeDashArray: [5, 5], opacity: 0.5 });
-    const t1 = new fabric.Line([
-      start.x - Math.sin(angle) * tickLen, start.y + Math.cos(angle) * tickLen,
-      start.x + Math.sin(angle) * tickLen, start.y - Math.cos(angle) * tickLen
-    ], { stroke: color, strokeWidth: 2, opacity: 0.5 });
-    const t2 = new fabric.Line([
-      end.x - Math.sin(angle) * tickLen, end.y + Math.cos(angle) * tickLen,
-      end.x + Math.sin(angle) * tickLen, end.y - Math.cos(angle) * tickLen
-    ], { stroke: color, strokeWidth: 2, opacity: 0.5 });
+
+    // perpedincular ticks
+    const tickDX = Math.sin(angle) * tickLen;
+    const tickDY = Math.cos(angle) * tickLen;
+    const t1 = new fabric.Line([start.x - tickDX, start.y + tickDY, start.x + tickDX, start.y - tickDY], { stroke: color, strokeWidth: 2, opacity: 0.5 });
+    const t2 = new fabric.Line([end.x - tickDX, end.y + tickDY, end.x + tickDX, end.y - tickDY], { stroke: color, strokeWidth: 2, opacity: 0.5 });
 
     const dist = Math.sqrt(dx * dx + dy * dy);
-    const qty = scale ? dist / scale : dist;
+    const qty = currentScale ? dist / currentScale : dist;
     const text = new fabric.IText(formatDistance(qty), {
       left: (start.x + end.x) / 2,
       top: (start.y + end.y) / 2 - 15,
@@ -271,7 +271,7 @@ const FloorPlanMeasure: React.FC = () => {
     ghostLineRef.current = group;
     fabricRef.current.add(group);
     fabricRef.current.requestRenderAll();
-  }, [scale, formatDistance, removeGhostLine]);
+  }, [currentScale, formatDistance, removeGhostLine]);
 
   // Command handlers
   const undo = useCallback(() => {
@@ -308,7 +308,7 @@ const FloorPlanMeasure: React.FC = () => {
         if (isDeductionMode) area = -area;
         setTakeoffItems(prev => prev.map(i => {
           if (i.id === activeItemId) {
-            const m: Measurement = { id: Math.random().toString(), points: [...currentPoints], quantity: area };
+            const m: Measurement = { id: Math.random().toString(), points: [...currentPoints], quantity: area, page: currentPage };
             return { ...i, measurements: [...i.measurements, m], totalQuantity: i.totalQuantity + area };
           }
           return i;
@@ -319,7 +319,7 @@ const FloorPlanMeasure: React.FC = () => {
     setTempLines([]);
     setCurrentPoints([]);
     removeGhostLine();
-  }, [activeItemId, currentPoints, isDeductionMode, takeoffItems, calculateArea, removeGhostLine, tempLines]);
+  }, [activeItemId, currentPoints, isDeductionMode, takeoffItems, calculateArea, removeGhostLine, tempLines, currentPage]);
 
   const handleCanvasClick = useCallback((rawPoint: Point) => {
     if (isSelectMode) return;
@@ -338,10 +338,11 @@ const FloorPlanMeasure: React.FC = () => {
         const pixelDist = Math.sqrt(dx * dx + dy * dy);
         const dist = parseDistance(calibrationDistance);
         if (dist > 0) {
-          setScale(pixelDist / dist);
+          const newScale = pixelDist / dist;
+          setScales(prev => ({ ...prev, [currentPage]: newScale }));
           setCalibrationMode(false);
           setCalibrationPoint1(null);
-          setCalibrationLine({ p1: calibrationPoint1, p2: snappedPoint, distance: dist });
+          setCalibrationLines(prev => ({ ...prev, [currentPage]: { p1: calibrationPoint1, p2: snappedPoint, distance: dist } }));
           removeGhostLine();
         }
       }
@@ -355,7 +356,7 @@ const FloorPlanMeasure: React.FC = () => {
     if (activeItem.type === "count") {
       setTakeoffItems(prev => prev.map(i => {
         if (i.id === activeItemId) {
-          const m: Measurement = { id: Math.random().toString(), points: [point], quantity: 1 };
+          const m: Measurement = { id: Math.random().toString(), points: [point], quantity: 1, page: currentPage };
           return { ...i, measurements: [...i.measurements, m], totalQuantity: i.totalQuantity + 1 };
         }
         return i;
@@ -368,10 +369,10 @@ const FloorPlanMeasure: React.FC = () => {
         const dx = snappedPoint.x - p1.x;
         const dy = snappedPoint.y - p1.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        const qty = scale ? dist / scale : dist;
+        const qty = currentScale ? dist / currentScale : dist;
         setTakeoffItems(prev => prev.map(i => {
           if (i.id === activeItemId) {
-            const m: Measurement = { id: Math.random().toString(), points: [p1, snappedPoint], quantity: qty };
+            const m: Measurement = { id: Math.random().toString(), points: [p1, snappedPoint], quantity: qty, page: currentPage };
             return { ...i, measurements: [...i.measurements, m], totalQuantity: i.totalQuantity + qty };
           }
           return i;
@@ -395,7 +396,7 @@ const FloorPlanMeasure: React.FC = () => {
         setTempLines(prev => [...prev, line]);
       }
     }
-  }, [isSelectMode, calibrationMode, calibrationPoint1, activeItemId, takeoffItems, parseDistance, calibrationDistance, scale, currentPoints, removeGhostLine, getSnappedVertex, getSnappedPoint]);
+  }, [isSelectMode, calibrationMode, calibrationPoint1, activeItemId, takeoffItems, parseDistance, calibrationDistance, currentPage, currentPoints, removeGhostLine, getSnappedVertex, getSnappedPoint, currentScale]);
 
   const handleCanvasMouseMove = useCallback((origPoint: Point) => {
     if (!fabricRef.current) return;
@@ -450,7 +451,7 @@ const FloorPlanMeasure: React.FC = () => {
     }
 
     takeoffItems.forEach(item => {
-      item.measurements.forEach(m => {
+      item.measurements.filter(m => m.page === currentPage).forEach(m => {
         if (item.type === 'linear' || item.type === 'polyline') {
           for (let i = 0; i < m.points.length - 1; i++) {
             drawDimensionProcedural(m.points[i], m.points[i + 1], item.color, item.name);
@@ -463,16 +464,28 @@ const FloorPlanMeasure: React.FC = () => {
       });
     });
 
-    if (calibrationLine) {
-      drawDimensionProcedural(calibrationLine.p1, calibrationLine.p2, '#ff0000', `Scale Ref: ${formatDistance(calibrationLine.distance)}`);
+    if (currentCalibrationLine) {
+      drawDimensionProcedural(currentCalibrationLine.p1, currentCalibrationLine.p2, '#ff0000', `Scale Ref: ${formatDistance(currentCalibrationLine.distance)}`);
     }
     canvas.requestRenderAll();
-  }, [takeoffItems, isSelectMode, scale, unitSystem, activeItemId, calibrationLine, drawAreaProcedural, drawCountProcedural, drawDimensionProcedural, formatDistance]);
+  }, [takeoffItems, isSelectMode, scales, currentPage, unitSystem, activeItemId, currentCalibrationLine, drawAreaProcedural, drawCountProcedural, drawDimensionProcedural, formatDistance]);
 
   // Event Listener Effect
   useEffect(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
+
+    const handleZoom = (opt: fabric.TPointerEventInfo<WheelEvent>) => {
+      const e = opt.e;
+      if (!e) return;
+      e.preventDefault();
+      const delta = e.deltaY;
+      let zoom = canvas.getZoom();
+      zoom *= 0.999 ** delta;
+      zoom = Math.min(Math.max(zoom, 0.2), 5);
+      const pointer = canvas.getPointer(e);
+      canvas.zoomToPoint(new fabric.Point(pointer.x, pointer.y), zoom);
+    };
 
     const onMouseDown = (opt: fabric.TPointerEventInfo<fabric.TPointerEvent>) => {
       const e = opt.e as MouseEvent;
@@ -546,6 +559,7 @@ const FloorPlanMeasure: React.FC = () => {
     canvas.on("mouse:up", onMouseUp);
     canvas.on("mouse:dblclick", onDoubleClick);
     canvas.on("object:modified", onObjectModified as (opt: unknown) => void);
+    canvas.on("mouse:wheel", handleZoom as (opt: fabric.TPointerEventInfo<fabric.TPointerEvent>) => void);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
 
@@ -555,6 +569,7 @@ const FloorPlanMeasure: React.FC = () => {
       canvas.off("mouse:up", onMouseUp);
       canvas.off("mouse:dblclick", onDoubleClick);
       canvas.off("object:modified", onObjectModified as (opt: unknown) => void);
+      canvas.off("mouse:wheel", handleZoom as (opt: fabric.TPointerEventInfo<fabric.TPointerEvent>) => void);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
@@ -565,8 +580,13 @@ const FloorPlanMeasure: React.FC = () => {
     if (projectState && !isStateLoaded.current) {
       console.log("Loading state from Dexie...");
       if (projectState.takeoffItems) setTakeoffItems(projectState.takeoffItems);
-      if (projectState.scale) setScale(projectState.scale);
-      if (projectState.calibrationLine) setCalibrationLine(projectState.calibrationLine);
+
+      // Multi-page migration / load
+      if (projectState.scales) setScales(projectState.scales);
+      else if (projectState.scale) setScales({ 1: projectState.scale });
+
+      if (projectState.calibrationLines) setCalibrationLines(projectState.calibrationLines);
+      else if (projectState.calibrationLine) setCalibrationLines({ 1: projectState.calibrationLine });
 
       if (projectState.backgroundImage) {
         fabric.FabricImage.fromURL(projectState.backgroundImage).then((img) => {
@@ -612,17 +632,15 @@ const FloorPlanMeasure: React.FC = () => {
   useEffect(() => {
     if (!isStateLoaded.current) return;
     const saveState = async () => {
-      // Note: We avoid toDataURL here to keep clicking smooth. 
-      // Background is saved only when it's first loaded/changed.
       await db.projectState.update('current', {
         takeoffItems,
-        scale,
-        calibrationLine
+        scales,
+        calibrationLines
       });
     };
     const timer = setTimeout(saveState, 500); // Shorter debounce for responsiveness
     return () => clearTimeout(timer);
-  }, [takeoffItems, scale, calibrationLine]);
+  }, [takeoffItems, scales, calibrationLines]);
 
   useEffect(() => {
     setTakeoffItems(prev => prev.map(item => {
@@ -780,6 +798,7 @@ const FloorPlanMeasure: React.FC = () => {
     <div className="flex h-screen bg-gray-100 overflow-hidden">
       <TakeoffSidebar
         items={takeoffItems}
+        scales={scales}
         activeItemId={activeItemId}
         onSelectItem={(id) => { setActiveItemId(id); setIsPanningMode(false); setIsSelectMode(false); setCurrentPoints([]); setTempLines([]); }}
         onCreateItem={createTakeoffItem}
@@ -798,13 +817,13 @@ const FloorPlanMeasure: React.FC = () => {
 
             <div className="h-8 w-px bg-gray-200" />
 
-            <div className="flex bg-gray-100 rounded-lg p-1 p-1">
+            <div className="flex bg-gray-100 rounded-lg p-1">
               <button
                 onClick={() => { setCalibrationMode(!calibrationMode); setCalibrationPoint1(null); }}
-                className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition ${calibrationMode ? 'bg-red-500 text-white animate-pulse' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
+                className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition ${calibrationMode ? 'bg-red-500 text-white animate-pulse' : currentScale ? 'bg-green-100 text-green-700 border border-green-200' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
               >
-                <Ruler className="w-5 h-5" />
-                <span>Calibrate</span>
+                {currentScale ? <Check className="w-5 h-5" /> : <Ruler className="w-5 h-5" />}
+                <span>{calibrationMode ? 'Calibrating...' : currentScale ? 'Calibrated' : 'Calibrate'}</span>
               </button>
               {calibrationMode && (
                 <input
@@ -861,7 +880,7 @@ const FloorPlanMeasure: React.FC = () => {
           <div className="flex items-center space-x-2">
             <button onClick={undo} className="p-2 hover:bg-gray-100 rounded-lg transition" title="Undo (Ctrl+Z)"> <Undo2 className="w-5 h-5 text-gray-600" /> </button>
             <button
-              onClick={() => { if (confirm("Clear all measurements?")) { setTakeoffItems([]); setScale(null); setCalibrationLine(null); } }}
+              onClick={() => { if (confirm("Clear all measurements?")) { setTakeoffItems([]); setScales({}); setCalibrationLines({}); } }}
               className="p-2 hover:bg-red-50 rounded-lg transition"
               title="Clear All"
             >
@@ -882,8 +901,16 @@ const FloorPlanMeasure: React.FC = () => {
             {pdfDoc && (
               <div className="absolute bottom-6 left-6 flex items-center space-x-4 bg-white/80 backdrop-blur p-2 rounded-xl shadow-xl border border-white/50">
                 <button onClick={() => { if (currentPage > 1) { setCurrentPage(p => p - 1); renderPage(currentPage - 1, pdfDoc); } }} className="p-1 hover:bg-gray-100 rounded-lg"> <ChevronLeft /> </button>
-                <span className="text-sm font-bold">Page {currentPage} of {numPages}</span>
+                <div className="flex flex-col items-center">
+                  <span className="text-[10px] text-gray-500 uppercase font-bold">Page</span>
+                  <span className="text-sm font-bold">{currentPage} / {numPages}</span>
+                </div>
                 <button onClick={() => { if (currentPage < numPages) { setCurrentPage(p => p + 1); renderPage(currentPage + 1, pdfDoc); } }} className="p-1 hover:bg-gray-100 rounded-lg"> <ChevronRight /> </button>
+                <div className="h-8 w-px bg-gray-200" />
+                <div className={`flex items-center space-x-1 px-2 py-1 rounded-lg text-[10px] font-bold ${currentScale ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  {currentScale ? <Check className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
+                  <span>{currentScale ? `CALIBRATED (1${unitSystem === 'metric' ? 'm' : 'ft'} = ${currentScale.toFixed(1)}px)` : 'UNSCALED'}</span>
+                </div>
               </div>
             )}
 
