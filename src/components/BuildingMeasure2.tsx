@@ -55,7 +55,7 @@ const FloorPlanMeasure: React.FC = () => {
   const [isPanningMode, setIsPanningMode] = useState(false);
   const [isDeductionMode, setIsDeductionMode] = useState(false);
   const [isSelectMode, setIsSelectMode] = useState(false);
-  const [unitSystem, setUnitSystem] = useState<'metric' | 'imperial'>('metric');
+  const [unitSystem] = useState<'metric' | 'imperial'>('metric');
   const [snappedVertex, setSnappedVertex] = useState<Point | null>(null);
 
   const isDragging = useRef(false);
