@@ -6,6 +6,7 @@ import type * as PDFJS from "pdfjs-dist";
 import { Point, Measurement, TakeoffItem, TakeoffMode } from "./types";
 import { ZoomIn, ZoomOut, Move, Ruler, FileUp, ChevronLeft, ChevronRight, Scissors, Undo2, RotateCcw, MousePointer2, Check, AlertCircle } from "lucide-react";
 import TakeoffSidebar from "./TakeoffSidebar";
+import TakeoffRightSidebar from "./TakeoffRightSidebar";
 import { db } from "../db";
 import { useLiveQuery } from "dexie-react-hooks";
 
@@ -854,7 +855,7 @@ const FloorPlanMeasure: React.FC = () => {
             >
               <MousePointer2 className="w-5 h-5" />
             </button>
-
+{/* 
             <div className="flex items-center bg-gray-100 rounded-lg p-1">
               <button
                 onClick={() => setUnitSystem('metric')}
@@ -864,7 +865,7 @@ const FloorPlanMeasure: React.FC = () => {
                 onClick={() => setUnitSystem('imperial')}
                 className={`px-3 py-1 text-[10px] font-bold rounded-md transition ${unitSystem === 'imperial' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
               > IMPERIAL </button>
-            </div>
+            </div> */}
 
             <button
               type="button"
@@ -892,6 +893,8 @@ const FloorPlanMeasure: React.FC = () => {
         <div className="flex-1 relative flex overflow-hidden">
           <div ref={containerRef} className="flex-1 bg-gray-200 relative overflow-hidden" onContextMenu={(e) => e.preventDefault()}>
             <canvas ref={canvasRef} />
+
+
 
             <div className="absolute bottom-6 right-6 flex items-center space-x-2 bg-white/80 backdrop-blur p-2 rounded-xl shadow-xl border border-white/50">
               <button onClick={() => fabricRef.current?.setZoom((fabricRef.current.getZoom() || 1) * 1.1)} className="p-2 hover:bg-gray-100 rounded-lg"> <ZoomIn className="w-5 h-5" /> </button>
@@ -932,7 +935,9 @@ const FloorPlanMeasure: React.FC = () => {
             )}
           </div>
         </div>
+        
       </div>
+      <TakeoffRightSidebar className="shrink-0" />
     </div>
   );
 };
